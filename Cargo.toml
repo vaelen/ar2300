@@ -1,0 +1,11 @@
+[package]
+name = "ar2300"
+version = "0.1.0"
+authors = ["Andrew Young <andrew@vaelen.org>"]
+edition = "2018"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+rusb = "0.8"
