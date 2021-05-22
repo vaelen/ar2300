@@ -14,7 +14,7 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with Foobar.  If not, see <https://www.gnu.org/licenses/>.
+    along with the AR2300 library.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 use rusb::{Device, GlobalContext};
