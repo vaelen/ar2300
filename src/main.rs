@@ -20,8 +20,10 @@
 use std::error::Error;
 use std::thread::sleep;
 use std::time::Duration;
+use std::sync::{Arc, Barrier};
+use simple_error::SimpleError;
 
-fn check_device(load_firmware: bool) -> Result<(),Box<dyn Error>> {
+fn check_device(load_firmware: bool) -> Result<(), Box<dyn Error>> {
     match ar2300::iq_device() {
         Some(iq_device) => {
             let device_info = ar2300::usb::device_info(&iq_device);
@@ -34,14 +36,31 @@ fn check_device(load_firmware: bool) -> Result<(),Box<dyn Error>> {
             } else {
                 println!("IQ Device: {}", device_info);
             }
+            Ok(())
         },
-        None => println!("IQ Device Not Found")
+        None => Err(Box::new(SimpleError::new("IQ Device Not Found")))
     }
-    Ok(())
+}
+
+fn receive() -> Result<Arc<Barrier>, Box<dyn Error>> {
+    if let Some(iq_device) = ar2300::iq_device() {
+        let barrier = Arc::new(Barrier::new(2));
+        let mut receiver = ar2300::iq::Receiver::new(iq_device)?;
+        let done = barrier.clone();
+        ctrlc::set_handler(move || {
+            receiver.stop();
+            done.wait();
+        })?;
+        Ok(barrier)
+    } else {
+        Err(Box::new(SimpleError::new("IQ Device Not Found")))
+    }
 }
 
 fn main() -> Result<(),Box<dyn Error>> {
     //ar2300::usb::list_devices();
     check_device(true)?;
+    let done = receive()?;
+    done.wait();
     Ok(())
 }

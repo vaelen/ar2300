@@ -17,7 +17,12 @@
     along with the AR2300 library.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use rusb::{Device, GlobalContext};
+use libusb1_sys::{constants::*, *};
+use rusb::{Device, GlobalContext, DeviceHandle, Error};
+use simple_error::SimpleError;
+use std::time::Duration;
+use std::os::raw::{c_int, c_uchar, c_uint};
+use std::ffi::c_void;
 
 const IQ_VENDOR_ID: u16 = 0x08d0;
 const IQ_PRODUCT_ID: u16 = 0xa001;
@@ -93,5 +98,113 @@ pub fn find_iq_device() -> Option<Device<GlobalContext>> {
         Ok(devices) =>
             devices.iter().find(|d| is_iq_device(d)),
         Err(_) => None
+    }
+}
+
+// Check for a kernel driver and detach it if necessary
+pub fn check_for_kernel_driver(handle: &mut DeviceHandle<GlobalContext>)
+    -> Result<(),SimpleError> {
+    match handle.set_auto_detach_kernel_driver(true) {
+        Ok(_) => Ok(()),
+        Err(e) => match e {
+            // Kernel drivers are not supported on this platform
+            rusb::Error::NotSupported => Ok(()),
+            // All other errors should return an error
+            _ => Err(SimpleError::new(format!("Couldn't check kernel driver status: {}", e)))
+        }
+    }
+}
+
+// Claim an interface
+pub fn claim_interface(handle: &mut DeviceHandle<GlobalContext>, interface: u8)
+    -> Result<(),SimpleError> {
+    check_for_kernel_driver(handle)?;
+    match handle.claim_interface(interface) {
+        Ok(_) => {
+            Ok(())
+        },
+        Err(e) => Err(SimpleError::new(format!("Couldn't claim interface: {}", e)))
+    }
+}
+
+pub type TransferCallback = fn(rusb::Result<&[u8]>) -> bool;
+
+/** Submits an Isochronous transfer. */
+pub fn submit_iso(
+    handle: &DeviceHandle<GlobalContext>,
+    endpoint: u8,
+    buffer: &mut [u8],
+    num_packets: usize,
+    packet_len: usize,
+    callback: TransferCallback,
+    timeout: Duration,
+) -> rusb::Result<()> {
+    if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN {
+        return Err(Error::InvalidParam);
+    }
+    unsafe {
+        let transfer = libusb_alloc_transfer(num_packets as c_int);
+
+        libusb_fill_iso_transfer(
+            transfer,
+            handle.as_raw(),
+            endpoint,
+            buffer.as_mut_ptr() as *mut c_uchar,
+            buffer.len() as c_int,
+            num_packets as c_int,
+            callback_wrapper,
+            callback as *mut() as *mut c_void,
+            timeout.as_millis() as c_uint
+        );
+
+        libusb_set_iso_packet_lengths(transfer, packet_len as c_uint);
+
+        match libusb_submit_transfer(transfer) {
+            0 => Ok(()),
+            err => Err(from_libusb(err))
+        }
+    }
+}
+
+extern "system" fn callback_wrapper (transfer: *mut libusb_transfer) {
+    println!("Native callback called");
+    unsafe {
+        let buffer = std::slice::from_raw_parts(
+            (*transfer).buffer,
+            (*transfer).actual_length as usize);
+
+        let c = (*transfer).user_data as *mut TransferCallback;
+        let callback = (*c) as TransferCallback;
+
+        println!("Calling rust callback");
+        let cont = callback(Ok(buffer));
+
+        if cont {
+            match libusb_submit_transfer(transfer) {
+                0 => {},
+                err => {
+                    callback(Err(from_libusb(err)));
+                }
+            }
+        }
+    }
+}
+
+/** This is copied from error.rs in rusb */
+fn from_libusb(err: i32) -> Error {
+    match err {
+        LIBUSB_ERROR_IO => Error::Io,
+        LIBUSB_ERROR_INVALID_PARAM => Error::InvalidParam,
+        LIBUSB_ERROR_ACCESS => Error::Access,
+        LIBUSB_ERROR_NO_DEVICE => Error::NoDevice,
+        LIBUSB_ERROR_NOT_FOUND => Error::NotFound,
+        LIBUSB_ERROR_BUSY => Error::Busy,
+        LIBUSB_ERROR_TIMEOUT => Error::Timeout,
+        LIBUSB_ERROR_OVERFLOW => Error::Overflow,
+        LIBUSB_ERROR_PIPE => Error::Pipe,
+        LIBUSB_ERROR_INTERRUPTED => Error::Interrupted,
+        LIBUSB_ERROR_NO_MEM => Error::NoMem,
+        LIBUSB_ERROR_NOT_SUPPORTED => Error::NotSupported,
+        LIBUSB_ERROR_OTHER | _ => Error::Other,
     }
 }

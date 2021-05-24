@@ -22,6 +22,7 @@ use std::error::Error;
 
 pub mod usb;
 pub mod firmware;
+pub mod iq;
 
 pub fn iq_device() -> Option<Device<GlobalContext>> {
     usb::find_iq_device()
