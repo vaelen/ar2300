@@ -17,16 +17,30 @@
     along with the AR2300 library.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use rusb::{Device, GlobalContext};
+use rusb::{Device, GlobalContext, UsbContext};
 use std::error::Error;
 
 pub mod usb;
 pub mod firmware;
 pub mod iq;
 
+/** Return the AR2300 IQ device. */
 pub fn iq_device() -> Option<Device<GlobalContext>> {
     usb::find_iq_device()
 }
+
+/** Program the AR2300 firmware. */
 pub fn program(device: &Device<GlobalContext>) -> Result<usize, Box<dyn Error>> {
     firmware::program(device)
+}
+
+/** Runs the USB event loop as long as is_running() returns true. */
+pub fn event_loop<F: Fn() -> bool>(is_running: F) -> rusb::Result<()> {
+    println!("Event Loop Starting");
+    while is_running() {
+        println!("Event Loop Running");
+        GlobalContext::default().handle_events(None)?;
+    }
+    println!("Event Loop Stopping");
+    Ok(())
 }

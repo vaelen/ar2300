@@ -22,7 +22,6 @@ use rusb::{Device, GlobalContext, DeviceHandle, Error};
 use simple_error::SimpleError;
 use std::time::Duration;
 use std::os::raw::{c_int, c_uchar, c_uint};
-use std::ffi::c_void;
 use std::cell::{Cell};
 
 const IQ_VENDOR_ID: u16 = 0x08d0;
@@ -45,7 +44,7 @@ pub fn list_devices() {
 }
 
 pub fn device_info(device: &Device<GlobalContext>) -> String {
-    let (manufacturer, product, serial) = match device.open() {
+    let (manufacturer, product) = match device.open() {
         Ok(handle) =>
             match device.device_descriptor() {
                 Ok(device_desc) => (
@@ -56,15 +55,11 @@ pub fn device_info(device: &Device<GlobalContext>) -> String {
                     match handle.read_product_string_ascii(&device_desc) {
                         Ok(s) => s,
                         Err(_) => String::new()
-                    },
-                    match handle.read_serial_number_string_ascii(&device_desc) {
-                        Ok(s) => s,
-                        Err(_) => String::new()
                     }
                 ),
-                Err(_) => (String::new(),String::new(),String::new())
+                Err(_) => (String::new(),String::new())
             },
-        Err(_) => (String::new(),String::new(),String::new())
+        Err(_) => (String::new(),String::new())
     };
 
     let id = match device.device_descriptor() {
@@ -74,13 +69,12 @@ pub fn device_info(device: &Device<GlobalContext>) -> String {
         Err(_) => String::new()
     };
 
-    format!("Bus: {:03} Device: {:03} ID: '{}' Manufacturer: '{}' Product: '{}' Serial: '{}'",
+    format!("Bus: {:03} Device: {:03} ID: '{}' Manufacturer: '{}' Product: '{}'",
             device.bus_number(),
             device.address(),
             id,
             manufacturer,
-            product,
-            serial)
+            product)
 }
 
 /** Returns true of the given USB device is an AR2300 IQ board */
@@ -161,7 +155,7 @@ pub fn submit_iso(
             buffer.len() as c_int,
             num_packets as c_int,
             callback_wrapper,
-            callback as *mut() as *mut c_void,
+            std::ptr::null_mut(),
             timeout.as_millis() as c_uint
         );
 

@@ -35,7 +35,6 @@ thread_local! {
     pub static RUNNING: AtomicBool = AtomicBool::new(true);
 }
 
-
 pub struct Receiver {
     stopping: Arc<Barrier>,
     stopped: Arc<Barrier>
@@ -91,7 +90,7 @@ impl Receiver {
                         PACKET_COUNT,
                         PACKET_LENGTH,
                         Receiver::callback,
-                        Duration::from_secs(1)) {
+                        Duration::from_millis(0)) {
                         Ok(_) => {
                             println!("Transfer request submitted");
                         }

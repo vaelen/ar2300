@@ -20,8 +20,9 @@
 use std::error::Error;
 use std::thread::sleep;
 use std::time::Duration;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc};
 use simple_error::SimpleError;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn check_device(load_firmware: bool) -> Result<(), Box<dyn Error>> {
     match ar2300::iq_device() {
@@ -42,16 +43,17 @@ fn check_device(load_firmware: bool) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn receive() -> Result<Arc<Barrier>, Box<dyn Error>> {
+fn receive() -> Result<(), Box<dyn Error>> {
     if let Some(iq_device) = ar2300::iq_device() {
-        let barrier = Arc::new(Barrier::new(2));
+        let running = Arc::new(AtomicBool::new(true));
         let mut receiver = ar2300::iq::Receiver::new(iq_device)?;
-        let done = barrier.clone();
+        let still_running = running.clone();
         ctrlc::set_handler(move || {
             receiver.stop();
-            done.wait();
+            still_running.swap(false, Ordering::Relaxed);
         })?;
-        Ok(barrier)
+        ar2300::event_loop(|| running.load(Ordering::Relaxed))?;
+        Ok(())
     } else {
         Err(Box::new(SimpleError::new("IQ Device Not Found")))
     }
@@ -60,7 +62,6 @@ fn receive() -> Result<Arc<Barrier>, Box<dyn Error>> {
 fn main() -> Result<(),Box<dyn Error>> {
     //ar2300::usb::list_devices();
     check_device(true)?;
-    let done = receive()?;
-    done.wait();
+    receive()?;
     Ok(())
 }
