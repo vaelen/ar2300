@@ -23,6 +23,7 @@ use simple_error::SimpleError;
 use std::time::Duration;
 use std::os::raw::{c_int, c_uchar, c_uint};
 use std::ffi::c_void;
+use std::cell::{Cell};
 
 const IQ_VENDOR_ID: u16 = 0x08d0;
 const IQ_PRODUCT_ID: u16 = 0xa001;
@@ -127,7 +128,14 @@ pub fn claim_interface(handle: &mut DeviceHandle<GlobalContext>, interface: u8)
     }
 }
 
+
+///// Isochronous Transfer Implementation /////
+
 pub type TransferCallback = fn(rusb::Result<&[u8]>) -> bool;
+
+thread_local! {
+    static CALLBACK: Cell<Option<TransferCallback>> = Cell::new(None);
+}
 
 /** Submits an Isochronous transfer. */
 pub fn submit_iso(
@@ -159,6 +167,8 @@ pub fn submit_iso(
 
         libusb_set_iso_packet_lengths(transfer, packet_len as c_uint);
 
+        CALLBACK.with(|c| c.replace(Some(callback)));
+
         match libusb_submit_transfer(transfer) {
             0 => Ok(()),
             err => Err(from_libusb(err))
@@ -168,26 +178,27 @@ pub fn submit_iso(
 
 extern "system" fn callback_wrapper (transfer: *mut libusb_transfer) {
     println!("Native callback called");
-    unsafe {
-        let buffer = std::slice::from_raw_parts(
-            (*transfer).buffer,
-            (*transfer).actual_length as usize);
+    CALLBACK.with(|c| {
+        if let Some(callback) = c.get() {
+            unsafe {
+                let buffer = std::slice::from_raw_parts(
+                    (*transfer).buffer,
+                    (*transfer).actual_length as usize);
 
-        let c = (*transfer).user_data as *mut TransferCallback;
-        let callback = (*c) as TransferCallback;
+                println!("Calling rust callback");
+                let cont = callback(Ok(buffer));
 
-        println!("Calling rust callback");
-        let cont = callback(Ok(buffer));
-
-        if cont {
-            match libusb_submit_transfer(transfer) {
-                0 => {},
-                err => {
-                    callback(Err(from_libusb(err)));
+                if cont {
+                    match libusb_submit_transfer(transfer) {
+                        0 => {},
+                        err => {
+                            callback(Err(from_libusb(err)));
+                        }
+                    }
                 }
             }
         }
-    }
+    });
 }
 
 /** This is copied from error.rs in rusb */
