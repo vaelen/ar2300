@@ -48,6 +48,7 @@ fn receive() -> Result<(), Box<dyn Error>> {
         let running = Arc::new(AtomicBool::new(true));
         let mut receiver = ar2300::iq::Receiver::new(iq_device)?;
         let still_running = running.clone();
+        receiver.start();
         ctrlc::set_handler(move || {
             receiver.stop();
             still_running.swap(false, Ordering::Relaxed);

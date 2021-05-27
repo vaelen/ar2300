@@ -38,9 +38,8 @@ pub fn program(device: &Device<GlobalContext>) -> Result<usize, Box<dyn Error>> 
 pub fn event_loop<F: Fn() -> bool>(is_running: F) -> rusb::Result<()> {
     println!("Event Loop Starting");
     while is_running() {
-        println!("Event Loop Running");
         GlobalContext::default().handle_events(None)?;
     }
-    println!("Event Loop Stopping");
+    println!("Event Loop Stopped");
     Ok(())
 }

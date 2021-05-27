@@ -20,8 +20,9 @@
 use rusb::{GlobalContext, DeviceHandle, Device};
 use std::error::Error;
 use std::time::Duration;
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
+use crate::usb::TransferCallback;
 
 const IQ_INTERFACE: u8 = 0;
 const CONTROL_ENDPOINT: u8 = 0x02;
@@ -31,56 +32,52 @@ const END_CAPTURE: [u8; 6] =  [0x5a, 0xa5, 0x00, 0x02, 0x41, 0x45];
 const PACKET_LENGTH: usize = 512*3;
 const PACKET_COUNT: usize = 1;
 
-thread_local! {
-    pub static RUNNING: AtomicBool = AtomicBool::new(true);
-}
-
 pub struct Receiver {
-    stopping: Arc<Barrier>,
-    stopped: Arc<Barrier>
+    running: Arc<AtomicBool>,
+    handle: Arc<DeviceHandle<GlobalContext>>
 }
 
-impl Receiver {
-    pub fn new(device: Device<GlobalContext>) -> Result<Receiver, Box<dyn Error>> {
-        let mut r = Receiver {
-            stopping: Arc::new(Barrier::new(2)),
-            stopped: Arc::new(Barrier::new(2))
-        };
-        let mut handle = device.open()?;
-        crate::usb::claim_interface(&mut handle, IQ_INTERFACE)?;
-        r.start_thread(handle, r.stopping.clone(), r.stopped.clone());
-        Ok(r)
-    }
-
-    fn callback(result: rusb::Result<&[u8]>) -> bool {
-        println!("Callback called");
+impl TransferCallback for Receiver {
+    fn callback(&self, result: rusb::Result<&[u8]>) -> bool {
         match result {
             Ok(buffer) => {
                 println!("Read {} bytes", buffer.len());
             },
             Err(e) => {
                 eprintln!("Error reading IQ data: {}", e);
+                self.running.swap(false, Ordering::Relaxed);
                 return false;
             }
         }
-        RUNNING.with(|running| {
-            running.load(Ordering::Relaxed)
+        self.running.load(Ordering::Relaxed)
+    }
+}
+
+impl Receiver {
+    pub fn new(device: Device<GlobalContext>) -> Result<Receiver, Box<dyn Error>> {
+        let mut handle = device.open()?;
+        crate::usb::claim_interface(&mut handle, IQ_INTERFACE)?;
+        Ok(Receiver {
+            running: Arc::new(AtomicBool::new(false)),
+            handle: Arc::new(handle)
         })
     }
 
-    /** Start data receiver thread */
-    fn start_thread(&mut self,
-                    handle: DeviceHandle<GlobalContext>,
-                    stopping: Arc<Barrier>,
-                    stopped: Arc<Barrier>) {
-        std::thread::spawn(move || {
+    /** Start data reception */
+    pub fn start(&mut self) {
+        let running = self.running.clone();
+        if let Ok(_) = running.compare_exchange(false,
+                                          true,
+                                          Ordering::Acquire,
+                                          Ordering::Relaxed) {
             // Start IQ capture
             println!("IQ capture starting");
-            match handle.write_bulk(CONTROL_ENDPOINT,
-                              &START_CAPTURE,
-                              Duration::from_secs(1)) {
+            match self.handle.write_bulk(CONTROL_ENDPOINT,
+                                         &START_CAPTURE,
+                                         Duration::from_secs(1)) {
                 Ok(_) => {
-                    let mut buf: [u8;4096] = [0;4096];
+                    let handle = self.handle.clone();
+                    let mut buf: [u8; 4096] = [0; 4096];
 
                     println!("Submitting transfer request");
                     match crate::usb::submit_iso(
@@ -89,7 +86,7 @@ impl Receiver {
                         &mut buf,
                         PACKET_COUNT,
                         PACKET_LENGTH,
-                        Receiver::callback,
+                        self,
                         Duration::from_millis(0)) {
                         Ok(_) => {
                             println!("Transfer request submitted");
@@ -99,31 +96,33 @@ impl Receiver {
                         }
                     }
 
-                    stopping.wait();
-                    print!("Stopping IQ capture");
-
-                    // End IQ capture
-                    match handle.write_bulk(CONTROL_ENDPOINT,
-                                            &END_CAPTURE,
-                                            Duration::from_secs(1)) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("Error stopping IQ capture: {}", e);
-                        }
-                    }
-                    println!("IQ capture stopped");
-                    stopped.wait();
                 },
                 Err(e) => {
                     eprintln!("Error starting IQ capture: {}", e);
                 }
             }
-        });
+        }
     }
 
     pub fn stop(&mut self) {
-        self.stopping.wait();
-        self.stopped.wait();
+        let running = self.running.clone();
+        if let Ok(_) = running.compare_exchange(true,
+                                                false,
+                                                Ordering::Acquire,
+                                                Ordering::Relaxed) {
+            print!("Stopping IQ capture");
+
+            // End IQ capture
+            match self.handle.write_bulk(CONTROL_ENDPOINT,
+                                    &END_CAPTURE,
+                                    Duration::from_secs(1)) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Error stopping IQ capture: {}", e);
+                }
+            }
+            println!("IQ capture stopped");
+        }
     }
 }
 

@@ -22,7 +22,7 @@ use rusb::{Device, GlobalContext, DeviceHandle, Error};
 use simple_error::SimpleError;
 use std::time::Duration;
 use std::os::raw::{c_int, c_uchar, c_uint};
-use std::cell::{Cell};
+use std::ffi::c_void;
 
 const IQ_VENDOR_ID: u16 = 0x08d0;
 const IQ_PRODUCT_ID: u16 = 0xa001;
@@ -122,23 +122,20 @@ pub fn claim_interface(handle: &mut DeviceHandle<GlobalContext>, interface: u8)
     }
 }
 
-
 ///// Isochronous Transfer Implementation /////
 
-pub type TransferCallback = fn(rusb::Result<&[u8]>) -> bool;
-
-thread_local! {
-    static CALLBACK: Cell<Option<TransferCallback>> = Cell::new(None);
+pub trait TransferCallback {
+    fn callback(&self, r: rusb::Result<&[u8]>) -> bool;
 }
 
 /** Submits an Isochronous transfer. */
-pub fn submit_iso(
+pub fn submit_iso<T: TransferCallback> (
     handle: &DeviceHandle<GlobalContext>,
     endpoint: u8,
     buffer: &mut [u8],
     num_packets: usize,
     packet_len: usize,
-    callback: TransferCallback,
+    callback: &mut T,
     timeout: Duration,
 ) -> rusb::Result<()> {
     if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN {
@@ -154,14 +151,12 @@ pub fn submit_iso(
             buffer.as_mut_ptr() as *mut c_uchar,
             buffer.len() as c_int,
             num_packets as c_int,
-            callback_wrapper,
-            std::ptr::null_mut(),
+            callback_wrapper::<T>,
+            callback as *mut _ as *mut c_void,
             timeout.as_millis() as c_uint
         );
 
         libusb_set_iso_packet_lengths(transfer, packet_len as c_uint);
-
-        CALLBACK.with(|c| c.replace(Some(callback)));
 
         match libusb_submit_transfer(transfer) {
             0 => Ok(()),
@@ -170,29 +165,26 @@ pub fn submit_iso(
     }
 }
 
-extern "system" fn callback_wrapper (transfer: *mut libusb_transfer) {
-    println!("Native callback called");
-    CALLBACK.with(|c| {
-        if let Some(callback) = c.get() {
-            unsafe {
-                let buffer = std::slice::from_raw_parts(
-                    (*transfer).buffer,
-                    (*transfer).actual_length as usize);
+extern "system" fn callback_wrapper<T: TransferCallback>(transfer: *mut libusb_transfer) {
+    unsafe {
+        let buffer = std::slice::from_raw_parts(
+            (*transfer).buffer,
+            (*transfer).actual_length as usize);
 
-                println!("Calling rust callback");
-                let cont = callback(Ok(buffer));
+        let user_data = (*transfer).user_data;
+        let callback = &mut *(user_data as *mut T);
 
-                if cont {
-                    match libusb_submit_transfer(transfer) {
-                        0 => {},
-                        err => {
-                            callback(Err(from_libusb(err)));
-                        }
-                    }
+        let cont = callback.callback(Ok(buffer));
+
+        if cont {
+            match libusb_submit_transfer(transfer) {
+                0 => {},
+                err => {
+                    callback.callback(Err(from_libusb(err)));
                 }
             }
         }
-    });
+    }
 }
 
 /** This is copied from error.rs in rusb */
