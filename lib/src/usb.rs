@@ -17,11 +17,11 @@
     along with the AR2300 library.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use libusb1_sys::{constants::*, *};
+use rusb::ffi::{constants::*, *};
 use rusb::{Device, GlobalContext, DeviceHandle, Error};
 use simple_error::SimpleError;
 use std::time::Duration;
-use std::os::raw::{c_int, c_uchar, c_uint};
+use std::os::raw::{c_int, c_uint};
 use std::ffi::c_void;
 
 const IQ_VENDOR_ID: u16 = 0x08d0;
@@ -77,21 +77,28 @@ pub fn device_info(device: &Device<GlobalContext>) -> String {
             product)
 }
 
-/** Returns true of the given USB device is an AR2300 IQ board */
-fn is_iq_device(device: &Device<GlobalContext>) -> bool {
-    match device.device_descriptor() {
-        Ok(desc) =>
-            desc.vendor_id() == IQ_VENDOR_ID &&
-                desc.product_id() == IQ_PRODUCT_ID,
-        Err(_) => false
+pub trait IsIQDevice {
+    fn is_iq_device(&self) -> bool;
+}
+
+impl IsIQDevice for Device<GlobalContext> {
+    /** Returns true of the given USB device is an AR2300 IQ board */
+    fn is_iq_device(&self) -> bool {
+        match self.device_descriptor() {
+            Ok(desc) =>
+                desc.vendor_id() == IQ_VENDOR_ID &&
+                    desc.product_id() == IQ_PRODUCT_ID,
+            Err(_) => false
+        }
     }
 }
+
 
 /** Find the AR2300 IQ device. */
 pub fn find_iq_device() -> Option<Device<GlobalContext>> {
     match rusb::devices() {
         Ok(devices) =>
-            devices.iter().find(|d| is_iq_device(d)),
+            devices.iter().find(|d| d.is_iq_device()),
         Err(_) => None
     }
 }
@@ -128,39 +135,63 @@ pub trait TransferCallback {
     fn callback(&self, r: rusb::Result<&[u8]>) -> bool;
 }
 
-/** Submits an Isochronous transfer. */
-pub fn submit_iso<T: TransferCallback> (
-    handle: &DeviceHandle<GlobalContext>,
-    endpoint: u8,
-    buffer: &mut [u8],
-    num_packets: usize,
-    packet_len: usize,
-    callback: &mut T,
-    timeout: Duration,
-) -> rusb::Result<()> {
-    if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN {
-        return Err(Error::InvalidParam);
-    }
-    unsafe {
-        let transfer = libusb_alloc_transfer(num_packets as c_int);
+pub trait IsochronousTransfer {
+    /** Submits an Isochronous transfer. */
+    fn submit_iso<T: TransferCallback> (
+        &self,
+        endpoint: u8,
+        num_packets: usize,
+        packet_len: usize,
+        callback: &mut T,
+        timeout: Duration,
+    ) -> rusb::Result<Vec<u8>>;
+}
 
-        libusb_fill_iso_transfer(
-            transfer,
-            handle.as_raw(),
-            endpoint,
-            buffer.as_mut_ptr() as *mut c_uchar,
-            buffer.len() as c_int,
-            num_packets as c_int,
-            callback_wrapper::<T>,
-            callback as *mut _ as *mut c_void,
-            timeout.as_millis() as c_uint
-        );
+impl IsochronousTransfer for DeviceHandle<GlobalContext> {
 
-        libusb_set_iso_packet_lengths(transfer, packet_len as c_uint);
+    /** Submits an Isochronous transfer. */
+    fn submit_iso<T: TransferCallback> (
+        &self,
+        endpoint: u8,
+        num_packets: usize,
+        packet_len: usize,
+        callback: &mut T,
+        timeout: Duration,
+    ) -> rusb::Result<Vec<u8>> {
+        if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN {
+            return Err(Error::InvalidParam);
+        }
 
-        match libusb_submit_transfer(transfer) {
-            0 => Ok(()),
-            err => Err(from_libusb(err))
+        let buffer_len = ( packet_len * num_packets ) + packet_len;
+        let mut buffer:Vec<u8> = vec![0; buffer_len];
+
+        unsafe {
+            let transfer = libusb_alloc_transfer(num_packets as c_int);
+
+            println!("Packets; {}, Buffer Length: {}, Capacity: {}, Pointer: {:X}", 
+            num_packets, 
+            buffer.len(), 
+            buffer.capacity(),
+            buffer.as_mut_ptr() as usize);
+
+            libusb_fill_iso_transfer(
+                transfer,
+                self.as_raw(),
+                endpoint,
+                buffer.as_mut_ptr(),
+                buffer.len() as c_int,
+                num_packets as c_int,
+                callback_wrapper::<T>,
+                callback as *mut _ as *mut c_void,
+                timeout.as_millis() as c_uint
+            );
+
+            libusb_set_iso_packet_lengths(transfer, packet_len as c_uint);
+
+            match libusb_submit_transfer(transfer) {
+                0 => Ok(buffer),
+                err => Err(from_libusb(err))
+            }
         }
     }
 }
@@ -174,7 +205,22 @@ extern "system" fn callback_wrapper<T: TransferCallback>(transfer: *mut libusb_t
         let user_data = (*transfer).user_data;
         let callback = &mut *(user_data as *mut T);
 
-        let cont = callback.callback(Ok(buffer));
+        println!("Packets; {}, Bytes Read: {}, Capacity: {}, Pointer: {:X}", 
+            (*transfer).num_iso_packets, 
+            (*transfer).actual_length, 
+            (*transfer).length, 
+            (*transfer).buffer as usize);
+
+        let cont = match (*transfer).status {
+            LIBUSB_TRANSFER_COMPLETED => callback.callback(Ok(buffer)),
+            LIBUSB_TRANSFER_ERROR => callback.callback(Err(Error::Other)),
+            LIBUSB_TRANSFER_TIMED_OUT => callback.callback(Err(Error::Timeout)),
+            LIBUSB_TRANSFER_CANCELLED => callback.callback(Err(Error::Interrupted)),
+            LIBUSB_TRANSFER_STALL => callback.callback(Err(Error::Io)),
+            LIBUSB_TRANSFER_NO_DEVICE => callback.callback(Err(Error::NoDevice)),
+            LIBUSB_TRANSFER_OVERFLOW => callback.callback(Err(Error::Overflow)),
+            err => callback.callback(Err(from_libusb(err))),
+        };
 
         if cont {
             match libusb_submit_transfer(transfer) {

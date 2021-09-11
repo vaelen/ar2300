@@ -22,15 +22,19 @@ use std::error::Error;
 use std::time::Duration;
 use std::sync::{Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
+use simple_error::{bail};
 use crate::usb::TransferCallback;
+use crate::usb::IsochronousTransfer;
+use crate::usb::claim_interface;
 
 const IQ_INTERFACE: u8 = 0;
 const CONTROL_ENDPOINT: u8 = 0x02;
 const DATA_ENDPOINT: u8 = 0x86;
 const START_CAPTURE: [u8; 6] = [0x5a, 0xa5, 0x00, 0x02, 0x41, 0x53];
 const END_CAPTURE: [u8; 6] =  [0x5a, 0xa5, 0x00, 0x02, 0x41, 0x45];
-const PACKET_LENGTH: usize = 512*3;
-const PACKET_COUNT: usize = 1;
+const PACKET_ATOM: usize = 512;
+const PACKET_LENGTH: usize = PACKET_ATOM*3;
+const PACKET_COUNT: usize = 8192;
 
 pub struct Receiver {
     running: Arc<AtomicBool>,
@@ -56,7 +60,7 @@ impl TransferCallback for Receiver {
 impl Receiver {
     pub fn new(device: Device<GlobalContext>) -> Result<Receiver, Box<dyn Error>> {
         let mut handle = device.open()?;
-        crate::usb::claim_interface(&mut handle, IQ_INTERFACE)?;
+        claim_interface(&mut handle, IQ_INTERFACE)?;
         Ok(Receiver {
             running: Arc::new(AtomicBool::new(false)),
             handle: Arc::new(handle)
@@ -64,7 +68,7 @@ impl Receiver {
     }
 
     /** Start data reception */
-    pub fn start(&mut self) {
+    pub fn start(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
         let running = self.running.clone();
         if let Ok(_) = running.compare_exchange(false,
                                           true,
@@ -77,30 +81,29 @@ impl Receiver {
                                          Duration::from_secs(1)) {
                 Ok(_) => {
                     let handle = self.handle.clone();
-                    let mut buf: [u8; 4096] = [0; 4096];
 
                     println!("Submitting transfer request");
-                    match crate::usb::submit_iso(
-                        &handle,
+                    match handle.submit_iso(
                         DATA_ENDPOINT,
-                        &mut buf,
                         PACKET_COUNT,
                         PACKET_LENGTH,
                         self,
                         Duration::from_millis(0)) {
-                        Ok(_) => {
+                        Ok(vec) => {
                             println!("Transfer request submitted");
+                            Ok(vec)
                         }
                         Err(e) => {
-                            eprintln!("Error submitting transfer request: {}", e);
+                            bail!("Error submitting transfer request: {}", e);
                         }
                     }
-
                 },
                 Err(e) => {
-                    eprintln!("Error starting IQ capture: {}", e);
+                    bail!("Error starting IQ capture: {}", e);
                 }
             }
+        } else {
+            bail!("Capture is already running")
         }
     }
 

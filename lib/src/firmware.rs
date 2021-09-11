@@ -99,7 +99,6 @@ fn parse_hex(data: &str) -> Vec<u8> {
 
 /** Write data to RAM */
 pub fn write_ram(handle: &DeviceHandle<GlobalContext>, address: u16, data: &[u8]) -> rusb::Result<usize> {
-    let mut bytes_written = 0;
-    bytes_written += handle.write_control(0x40, 0xa0, address, 0, data, Duration::from_secs(5))?;
+    let bytes_written = handle.write_control(0x40, 0xa0, address, 0, data, Duration::from_secs(5))?;
     Ok(bytes_written)
 }

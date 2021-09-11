@@ -48,7 +48,7 @@ fn receive() -> Result<(), Box<dyn Error>> {
         let running = Arc::new(AtomicBool::new(true));
         let mut receiver = ar2300::iq::Receiver::new(iq_device)?;
         let still_running = running.clone();
-        receiver.start();
+        let _buf = receiver.start()?;
         ctrlc::set_handler(move || {
             receiver.stop();
             still_running.swap(false, Ordering::Relaxed);
@@ -60,7 +60,8 @@ fn receive() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn main() -> Result<(),Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(),Box<dyn Error>> {
     //ar2300::usb::list_devices();
     check_device(true)?;
     receive()?;
