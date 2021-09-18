@@ -38,7 +38,8 @@ const PACKET_COUNT: usize = 8192;
 
 pub struct Receiver {
     running: Arc<AtomicBool>,
-    handle: Arc<DeviceHandle<GlobalContext>>
+    handle: Arc<DeviceHandle<GlobalContext>>,
+    buf: Option<Box<Vec<u8>>>
 }
 
 impl TransferCallback for Receiver {
@@ -50,7 +51,6 @@ impl TransferCallback for Receiver {
             Err(e) => {
                 eprintln!("Error reading IQ data: {}", e);
                 self.running.swap(false, Ordering::Relaxed);
-                return false;
             }
         }
         self.running.load(Ordering::Relaxed)
@@ -63,12 +63,18 @@ impl Receiver {
         claim_interface(&mut handle, IQ_INTERFACE)?;
         Ok(Receiver {
             running: Arc::new(AtomicBool::new(false)),
-            handle: Arc::new(handle)
+            handle: Arc::new(handle),
+            buf: None,
         })
     }
 
+    pub fn is_running(&self) -> Box<dyn Fn()->bool> {
+        let r = self.running.clone();
+        Box::new(move || r.load(Ordering::Relaxed))
+    }
+
     /** Start data reception */
-    pub fn start(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub fn start(&mut self) -> Result<(), Box<dyn Error>> {
         let running = self.running.clone();
         if let Ok(_) = running.compare_exchange(false,
                                           true,
@@ -90,8 +96,9 @@ impl Receiver {
                         self,
                         Duration::from_millis(0)) {
                         Ok(vec) => {
+                            self.buf = Some(vec);
                             println!("Transfer request submitted");
-                            Ok(vec)
+                            Ok(())
                         }
                         Err(e) => {
                             bail!("Error submitting transfer request: {}", e);

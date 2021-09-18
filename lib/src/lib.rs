@@ -18,7 +18,7 @@
  */
 
 use rusb::{Device, GlobalContext, UsbContext};
-use std::error::Error;
+use std::{error::Error, time::Duration};
 
 pub mod usb;
 pub mod firmware;
@@ -38,7 +38,7 @@ pub fn program(device: &Device<GlobalContext>) -> Result<usize, Box<dyn Error>> 
 pub fn event_loop<F: Fn() -> bool>(is_running: F) -> rusb::Result<()> {
     println!("Event Loop Starting");
     while is_running() {
-        GlobalContext::default().handle_events(None)?;
+        GlobalContext::default().handle_events(Some(Duration::from_millis(50)))?;
     }
     println!("Event Loop Stopped");
     Ok(())

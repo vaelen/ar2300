@@ -144,7 +144,7 @@ pub trait IsochronousTransfer {
         packet_len: usize,
         callback: &mut T,
         timeout: Duration,
-    ) -> rusb::Result<Vec<u8>>;
+    ) -> rusb::Result<Box<Vec<u8>>>;
 }
 
 impl IsochronousTransfer for DeviceHandle<GlobalContext> {
@@ -157,13 +157,13 @@ impl IsochronousTransfer for DeviceHandle<GlobalContext> {
         packet_len: usize,
         callback: &mut T,
         timeout: Duration,
-    ) -> rusb::Result<Vec<u8>> {
+    ) -> rusb::Result<Box<Vec<u8>>> {
         if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN {
             return Err(Error::InvalidParam);
         }
 
         let buffer_len = ( packet_len * num_packets ) + packet_len;
-        let mut buffer:Vec<u8> = vec![0; buffer_len];
+        let mut buffer:Box<Vec<u8>> = Box::new(vec![0; buffer_len]);
 
         unsafe {
             let transfer = libusb_alloc_transfer(num_packets as c_int);
