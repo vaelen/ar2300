@@ -17,53 +17,32 @@
     along with the AR2300 library.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use std::error::Error;
-use std::thread::sleep;
-use std::time::Duration;
-use std::sync::{Arc};
-use simple_error::SimpleError;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{error::Error, fs::File, thread::spawn};
+use ar2300::{init_device, new_queue, receive, write};
 
-fn check_device(load_firmware: bool) -> Result<(), Box<dyn Error>> {
-    match ar2300::iq_device() {
-        Some(iq_device) => {
-            let device_info = ar2300::usb::device_info(&iq_device);
-            if load_firmware && !device_info.contains("AOR, LTD") {
-                println!("Writing firmware");
-                let bytes_written = ar2300::program(&iq_device)?;
-                println!("Bytes written: {}", bytes_written);
-                sleep(Duration::from_secs(1));
-                check_device(false)?;
-            } else {
-                println!("IQ Device: {}", device_info);
-            }
-            Ok(())
-        },
-        None => Err(Box::new(SimpleError::new("IQ Device Not Found")))
-    }
-}
-
-fn receive() -> Result<(), Box<dyn Error>> {
-    if let Some(iq_device) = ar2300::iq_device() {
-        let running = Arc::new(AtomicBool::new(true));
-        let mut receiver = ar2300::iq::Receiver::new(iq_device)?;
-        let still_running = running.clone();
-        let _buf = receiver.start()?;
-        ctrlc::set_handler(move || {
-            receiver.stop();
-            still_running.swap(false, Ordering::Relaxed);
-        })?;
-        ar2300::event_loop(|| running.load(Ordering::Relaxed))?;
-        Ok(())
-    } else {
-        Err(Box::new(SimpleError::new("IQ Device Not Found")))
-    }
-}
-
-#[tokio::main]
-async fn main() -> Result<(),Box<dyn Error>> {
+fn main() -> Result<(),Box<dyn Error>> {
+    let filename = "iq.bin";
     //ar2300::usb::list_devices();
-    check_device(true)?;
-    receive()?;
+    init_device(true)?;
+    let f = Box::new(File::create(filename)?);
+    let mut q = new_queue();
+    let read_q = q.clone();
+    let write_q = q.clone();
+
+    let r = spawn(move || {
+        if let Err(e) = receive(read_q) {
+            eprint!("Error reading from radio: {}", e);
+        }
+    });
+        
+    let w = spawn(|| {
+        if let Err(e) = write(write_q, f) {
+            eprint!("Error writing to file: {}", e);
+        }
+    });
+
+    r.join().unwrap();
+    w.join().unwrap();
+
     Ok(())
 }

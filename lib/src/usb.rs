@@ -132,7 +132,8 @@ pub fn claim_interface(handle: &mut DeviceHandle<GlobalContext>, interface: u8)
 ///// Isochronous Transfer Implementation /////
 
 pub trait TransferCallback {
-    fn callback(&self, r: rusb::Result<&[u8]>) -> bool;
+    fn callback(&self, r: rusb::Result<()>) -> bool;
+    fn buffer(&mut self) -> &mut [u8];
 }
 
 pub trait IsochronousTransfer {
@@ -144,7 +145,7 @@ pub trait IsochronousTransfer {
         packet_len: usize,
         callback: &mut T,
         timeout: Duration,
-    ) -> rusb::Result<Box<Vec<u8>>>;
+    ) -> rusb::Result<()>;
 }
 
 impl IsochronousTransfer for DeviceHandle<GlobalContext> {
@@ -157,22 +158,19 @@ impl IsochronousTransfer for DeviceHandle<GlobalContext> {
         packet_len: usize,
         callback: &mut T,
         timeout: Duration,
-    ) -> rusb::Result<Box<Vec<u8>>> {
+    ) -> rusb::Result<()> {
         if endpoint & LIBUSB_ENDPOINT_DIR_MASK != LIBUSB_ENDPOINT_IN {
             return Err(Error::InvalidParam);
         }
 
         let buffer_len = ( packet_len * num_packets ) + packet_len;
-        let mut buffer:Box<Vec<u8>> = Box::new(vec![0; buffer_len]);
+        let buffer = callback.buffer();
+        if buffer.len() < buffer_len {
+            return Err(Error::InvalidParam);
+        }
 
         unsafe {
             let transfer = libusb_alloc_transfer(num_packets as c_int);
-
-            println!("Packets; {}, Buffer Length: {}, Capacity: {}, Pointer: {:X}", 
-            num_packets, 
-            buffer.len(), 
-            buffer.capacity(),
-            buffer.as_mut_ptr() as usize);
 
             libusb_fill_iso_transfer(
                 transfer,
@@ -189,7 +187,7 @@ impl IsochronousTransfer for DeviceHandle<GlobalContext> {
             libusb_set_iso_packet_lengths(transfer, packet_len as c_uint);
 
             match libusb_submit_transfer(transfer) {
-                0 => Ok(buffer),
+                0 => Ok(()),
                 err => Err(from_libusb(err))
             }
         }
@@ -197,37 +195,33 @@ impl IsochronousTransfer for DeviceHandle<GlobalContext> {
 }
 
 extern "system" fn callback_wrapper<T: TransferCallback>(transfer: *mut libusb_transfer) {
-    unsafe {
-        let buffer = std::slice::from_raw_parts(
-            (*transfer).buffer,
-            (*transfer).actual_length as usize);
+    let callback = unsafe {
+        &mut *((*transfer).user_data as *mut T)
+    };
 
-        let user_data = (*transfer).user_data;
-        let callback = &mut *(user_data as *mut T);
+    let status = unsafe {
+        (*transfer).status
+    };
 
-        println!("Packets; {}, Bytes Read: {}, Capacity: {}, Pointer: {:X}", 
-            (*transfer).num_iso_packets, 
-            (*transfer).actual_length, 
-            (*transfer).length, 
-            (*transfer).buffer as usize);
+    let cont = match status {
+        LIBUSB_TRANSFER_COMPLETED => callback.callback(Ok(())),
+        LIBUSB_TRANSFER_ERROR => callback.callback(Err(Error::Other)),
+        LIBUSB_TRANSFER_TIMED_OUT => callback.callback(Err(Error::Timeout)),
+        LIBUSB_TRANSFER_CANCELLED => callback.callback(Err(Error::Interrupted)),
+        LIBUSB_TRANSFER_STALL => callback.callback(Err(Error::Io)),
+        LIBUSB_TRANSFER_NO_DEVICE => callback.callback(Err(Error::NoDevice)),
+        LIBUSB_TRANSFER_OVERFLOW => callback.callback(Err(Error::Overflow)),
+        err => callback.callback(Err(from_libusb(err))),
+    };
 
-        let cont = match (*transfer).status {
-            LIBUSB_TRANSFER_COMPLETED => callback.callback(Ok(buffer)),
-            LIBUSB_TRANSFER_ERROR => callback.callback(Err(Error::Other)),
-            LIBUSB_TRANSFER_TIMED_OUT => callback.callback(Err(Error::Timeout)),
-            LIBUSB_TRANSFER_CANCELLED => callback.callback(Err(Error::Interrupted)),
-            LIBUSB_TRANSFER_STALL => callback.callback(Err(Error::Io)),
-            LIBUSB_TRANSFER_NO_DEVICE => callback.callback(Err(Error::NoDevice)),
-            LIBUSB_TRANSFER_OVERFLOW => callback.callback(Err(Error::Overflow)),
-            err => callback.callback(Err(from_libusb(err))),
+    if cont {
+        let s = unsafe {
+            libusb_submit_transfer(transfer)
         };
-
-        if cont {
-            match libusb_submit_transfer(transfer) {
-                0 => {},
-                err => {
-                    callback.callback(Err(from_libusb(err)));
-                }
+        match s {
+            0 => {},
+            err => {
+                callback.callback(Err(from_libusb(err)));
             }
         }
     }

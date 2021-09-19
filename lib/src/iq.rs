@@ -17,12 +17,15 @@
     along with the AR2300 library.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+use byteorder::{BigEndian, ByteOrder, LittleEndian, WriteBytesExt};
 use rusb::{GlobalContext, DeviceHandle, Device};
 use std::error::Error;
+use std::io::Write;
 use std::time::Duration;
 use std::sync::{Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use simple_error::{bail};
+use crate::queue::Queue;
 use crate::usb::TransferCallback;
 use crate::usb::IsochronousTransfer;
 use crate::usb::claim_interface;
@@ -34,37 +37,102 @@ const START_CAPTURE: [u8; 6] = [0x5a, 0xa5, 0x00, 0x02, 0x41, 0x53];
 const END_CAPTURE: [u8; 6] =  [0x5a, 0xa5, 0x00, 0x02, 0x41, 0x45];
 const PACKET_ATOM: usize = 512;
 const PACKET_LENGTH: usize = PACKET_ATOM*3;
-const PACKET_COUNT: usize = 8192;
+const PACKET_COUNT: usize = 2;
+
+const BUFFER_LEN: usize = ( PACKET_LENGTH * PACKET_COUNT ) + PACKET_LENGTH;
 
 pub struct Receiver {
     running: Arc<AtomicBool>,
     handle: Arc<DeviceHandle<GlobalContext>>,
-    buf: Option<Box<Vec<u8>>>
+    buf: Box<Vec<u8>>,
+    skip_packet: Arc<AtomicBool>,
+    queue: Queue<(f32,f32)>,
+}
+
+fn valid_packet(buffer: &[u8]) -> bool {
+    (buffer[1] & 0x01) == 0x01
+}
+
+fn find_packet(buffer: &[u8]) -> Result<&[u8], Box<dyn Error>> {
+    let mut buf = buffer;
+    while buf.len() > 8 && !valid_packet(buf) {
+        buf = &buf[1..];
+    }
+    if valid_packet(buf) {
+        Ok(buf)
+    } else {
+        bail!("Packet not found")
+    }
+}
+
+const BASE: f32 = 2f32 * 2147483648.0f32;
+
+fn read_packet(packet: &[u8]) -> (f32, f32) {
+    let i = LittleEndian::read_u32(&packet[0..4]);
+    let q = LittleEndian::read_u32(&packet[4..8]);
+
+    let f = |n: u32| -> f32 {
+        let mut n16 = [
+            (n >> 16) as u16,
+            n as u16,
+        ];
+        // received data processing.
+        if (n16[0] & 0x8000) == 0x8000 {
+            n16[1] = n16[1] | 0x0001;
+        } else {
+            n16[1] = n16[1] & 0xfffe;
+        }
+        n16[0] = n16[0] << 1;
+        ((((n16[0] as u32) << 16) | (n16[1] as u32)) as f32) / BASE
+    };
+
+    (f(i), f(q))
 }
 
 impl TransferCallback for Receiver {
-    fn callback(&self, result: rusb::Result<&[u8]>) -> bool {
-        match result {
-            Ok(buffer) => {
-                println!("Read {} bytes", buffer.len());
-            },
+    fn buffer(&mut self) -> &mut [u8] {
+        self.buf.as_mut_slice()
+    }
+
+    fn callback(&self, result: rusb::Result<()>) -> bool {
+        let success = match result {
+            Ok(_) => true,
+            Err(rusb::Error::Other) => true,
             Err(e) => {
                 eprintln!("Error reading IQ data: {}", e);
                 self.running.swap(false, Ordering::Relaxed);
+                false
             }
+        };
+        if success && !self.skip_packet.swap(false, Ordering::Relaxed) {
+            let buffer = *self.buf.clone();
+            match find_packet(buffer.as_slice()) {
+                Ok(buf) => {
+                    for packet in buf.chunks(8) {
+                        if packet.len() == 8 && valid_packet(packet) {
+                            self.queue.enqueue(read_packet(packet));
+                        }
+                        // TODO: Handle buffering the last partial packet
+                    }
+                },
+                Err(_) => eprintln!("Couldn't find packet"),
+            }
+
         }
         self.running.load(Ordering::Relaxed)
     }
 }
 
 impl Receiver {
-    pub fn new(device: Device<GlobalContext>) -> Result<Receiver, Box<dyn Error>> {
+    pub fn new(device: Device<GlobalContext>, queue: Queue<(f32,f32)>) -> Result<Receiver, Box<dyn Error>> {
         let mut handle = device.open()?;
         claim_interface(&mut handle, IQ_INTERFACE)?;
         Ok(Receiver {
             running: Arc::new(AtomicBool::new(false)),
             handle: Arc::new(handle),
-            buf: None,
+            buf: Box::new(vec![0; BUFFER_LEN]),
+            skip_packet: Arc::new(AtomicBool::new(true)),
+            queue: queue,
         })
     }
 
@@ -73,7 +141,10 @@ impl Receiver {
         Box::new(move || r.load(Ordering::Relaxed))
     }
 
-    /** Start data reception */
+    pub fn queue(&self) -> Queue<(f32,f32)> {
+        self.queue.clone()
+    }
+
     pub fn start(&mut self) -> Result<(), Box<dyn Error>> {
         let running = self.running.clone();
         if let Ok(_) = running.compare_exchange(false,
@@ -81,7 +152,7 @@ impl Receiver {
                                           Ordering::Acquire,
                                           Ordering::Relaxed) {
             // Start IQ capture
-            println!("IQ capture starting");
+            println!("IQ receiver starting");
             match self.handle.write_bulk(CONTROL_ENDPOINT,
                                          &START_CAPTURE,
                                          Duration::from_secs(1)) {
@@ -95,8 +166,7 @@ impl Receiver {
                         PACKET_LENGTH,
                         self,
                         Duration::from_millis(0)) {
-                        Ok(vec) => {
-                            self.buf = Some(vec);
+                        Ok(_) => {
                             println!("Transfer request submitted");
                             Ok(())
                         }
@@ -106,11 +176,11 @@ impl Receiver {
                     }
                 },
                 Err(e) => {
-                    bail!("Error starting IQ capture: {}", e);
+                    bail!("Error starting IQ receiver: {}", e);
                 }
             }
         } else {
-            bail!("Capture is already running")
+            bail!("IQ receiver is already running")
         }
     }
 
@@ -120,7 +190,9 @@ impl Receiver {
                                                 false,
                                                 Ordering::Acquire,
                                                 Ordering::Relaxed) {
-            print!("Stopping IQ capture");
+            print!("Stopping IQ receiver");
+           
+            self.queue.close();
 
             // End IQ capture
             match self.handle.write_bulk(CONTROL_ENDPOINT,
@@ -131,7 +203,6 @@ impl Receiver {
                     eprintln!("Error stopping IQ capture: {}", e);
                 }
             }
-            println!("IQ capture stopped");
         }
     }
 }
@@ -140,4 +211,41 @@ impl Drop for Receiver {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+pub struct Writer {
+    queue: Queue<(f32,f32)>,
+    out: Box<dyn Write>,
+}
+
+impl Writer {
+    pub fn new(queue: Queue<(f32,f32)>, out: Box<dyn Write>) -> Writer {
+        Writer {
+            queue: queue,
+            out: out,
+        }
+    }
+
+    pub fn queue(&self) -> Queue<(f32,f32)> {
+        self.queue.clone()
+    }
+
+    pub fn write(&mut self, timeout: Duration) -> Result<(), Box<dyn Error>> {
+        if let Some((i,q)) = self.queue.dequeue(timeout) {
+            self.out.write_f32::<BigEndian>(i)?;
+            self.out.write_f32::<BigEndian>(q)?;
+        }
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<(), Box<dyn Error>> {
+        while !self.queue.is_empty() {
+            self.write(Duration::from_millis(50))?;
+        }
+        Ok(())
+    }
+}
+
+pub fn new_queue() -> Queue<(f32,f32)> {
+    Queue::new(BUFFER_LEN/8)
 }
