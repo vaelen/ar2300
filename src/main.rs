@@ -25,7 +25,7 @@ fn main() -> Result<(),Box<dyn Error>> {
     //ar2300::usb::list_devices();
     init_device(true)?;
     let f = Box::new(File::create(filename)?);
-    let mut q = new_queue();
+    let q = new_queue();
     let read_q = q.clone();
     let write_q = q.clone();
 
